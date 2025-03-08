@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Search Results</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 800px; margin: auto; }
+        .product { border: 1px solid #ddd; padding: 15px; margin-bottom: 10px; display: flex; align-items: center; }
+        .product img { width: 100px; height: auto; margin-right: 15px; }
+        .product a { text-decoration: none; color: blue; }
+        .search-box { margin-bottom: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Search Results for "{{ query }}"</h1>
+
+        <div class="search-box">
+            <form action="/search" method="get">
+                <input type="text" name="query" placeholder="Search again..." required>
+                <button type="submit">Search</button>
+            </form>
+        </div>
+
+        {% for item in results %}
+        <div class="product">
+            <img src="{{ item.image }}" alt="Product Image">
+            <div>
+                <h3><a href="{{ item.link }}" target="_blank">{{ item.title }}</a></h3>
+                <p><strong>Price:</strong> {{ item.price }}</p>
+                <p><strong>Condition:</strong> {{ item.condition }}</p>
+                <p><strong>Ships From:</strong> {{ item.country }}</p>
+                <p><strong>Seller Rating:</strong> {{ item.rating }}</p>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</body>
+</html>
+

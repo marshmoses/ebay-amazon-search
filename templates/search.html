@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>eBay Product Search</title>
+</head>
+<body>
+    <h1>Search eBay Products</h1>
+    <form action="/search" method="GET">
+        <input type="text" name="query" placeholder="Enter product name">
+        <button type="submit">Search</button>
+    </form>
+    {% if message %}
+        <p>{{ message }}</p>
+    {% endif %}
+</body>
+</html>
