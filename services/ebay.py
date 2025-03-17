@@ -1,61 +1,118 @@
 import requests
-from services.database import cache_collection
+import logging
+import datetime
+import time
+from services.database import cache_collection, store_user_search
+from services.ebay_auth import get_ebay_token  # Import OAuth token function
 
-# eBay API Details
-APP_ID = "MosesMac-pricemon-PRD-85bb4ae7d-e6d9b5f3"
-EBAY_FINDING_API = "https://svcs.ebay.com/services/search/FindingService/v1"
+CACHE_EXPIRATION_HOURS = 24  # Cache expiration time
+EBAY_API_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
+MAX_RETRIES = 3  # Number of times to retry
+TIMEOUT = 20  # API request timeout in seconds
 
-def search_ebay(query):
-    """Search for products on eBay and return results with caching."""
+
+def search_ebay(query, max_results=50):
+    """Search for products on eBay using OAuth authentication from MongoDB."""
     
-    # Check if query is already cached
+    access_token = get_ebay_token()  # Retrieve token from MongoDB
+
+    if not access_token:
+        logging.error("❌ ERROR: Unable to get a valid eBay token.")
+        return []
+
+    # Check MongoDB for cached results
     cached_result = cache_collection.find_one({"query": query})
+    
     if cached_result:
-        print("✅ Using Cached Data")
-        return cached_result["results"]
+        last_updated = cached_result.get("last_updated", datetime.datetime.min)
+        time_difference = datetime.datetime.utcnow() - last_updated
 
-    # API request
-    params = {
-        "OPERATION-NAME": "findItemsByKeywords",
-        "SERVICE-VERSION": "1.0.0",
-        "SECURITY-APPNAME": APP_ID,
-        "RESPONSE-DATA-FORMAT": "JSON",
-        "keywords": query,
-        "paginationInput.entriesPerPage": 5,
-        "outputSelector": "PictureURLLarge"
-    }
+        if time_difference.total_seconds() < CACHE_EXPIRATION_HOURS * 3600:
+            logging.info(f"📦 Returning cached eBay results for query: {query}")
+            return cached_result["results"]
 
-    response = requests.get(EBAY_FINDING_API, params=params)
-    
-    if response.status_code == 200:
-        data = response.json()
-        items = data.get("findItemsByKeywordsResponse", [{}])[0].get("searchResult", [{}])[0].get("item", [])
+    results = []
+    page = 1
+    total_results = 0
 
-        results = []
-        for item in items:
-            title = item.get("title", ["N/A"])[0]
-            price = item.get("sellingStatus", [{}])[0].get("currentPrice", [{}])[0].get("__value__", "N/A")
-            currency = item.get("sellingStatus", [{}])[0].get("currentPrice", [{}])[0].get("@currencyId", "USD")
-            condition = item.get("condition", [{}])[0].get("conditionDisplayName", ["N/A"])[0]
-            country = item.get("country", ["N/A"])[0]
-            image = item.get("galleryURL", ["static/no-image.png"])[0]
-            link = item.get("viewItemURL", ["#"])[0]
-            rating = item.get("sellerInfo", [{}])[0].get("positiveFeedbackPercent", ["N/A"])[0]
+    attempt = 0
+    while attempt < MAX_RETRIES:
+        try:
+            headers = {
+                "Authorization": f"Bearer {access_token}",
+                "X-EBAY-C-ENDUSERCTX": "contextualLocation=country=US"
+            }
 
-            results.append({
-                "title": title,
-                "price": f"{price} {currency}",
-                "condition": condition,
-                "country": country,
-                "image": image,
-                "link": link,
-                "rating": f"{rating}%" if rating != "N/A" else "No rating"
-            })
+            params = {
+                "q": query,
+                "limit": min(50, max_results - total_results)
+            }
 
-        # Cache results in MongoDB
-        cache_collection.insert_one({"query": query, "results": results})
-        print("✅ Cached API Response")
+            logging.info(f"🔎 Attempt {attempt + 1}: Fetching page {page} for query: {query}")
+            response = requests.get(EBAY_API_URL, headers=headers, params=params, timeout=TIMEOUT)
 
-        return results
-    
-    return None  # Return None if API call fails
+            if response.status_code == 200:
+                data = response.json()
+                items = data.get("itemSummaries", [])
+
+                if not items:
+                    logging.warning(f"⚠️ No results found for query: {query}")
+                    return []
+
+                # Process and return results
+                for item in items:
+                    try:
+                        results.append({
+                            "ebay_id": item.get("itemId", "N/A"),
+                            "title": item.get("title", "N/A"),
+                            "price": f"{item.get('price', {}).get('value', 'N/A')} {item.get('price', {}).get('currency', 'USD')}",
+                            "condition": item.get("condition", "N/A"),
+                            "image": item.get("thumbnailImages", [{}])[0].get("imageUrl", "static/no-image.png"),
+                            "link": item.get("itemWebUrl", "#"),
+                            "rating": item.get("seller", {}).get("feedbackPercentage", "No rating") + "%"
+                        })
+                    except Exception as e:
+                        logging.warning(f"⚠️ Error processing item: {e}", exc_info=True)
+
+                total_results += len(items)
+                page += 1
+
+                if len(items) == 0:
+                    break
+
+                logging.info(f"✅ Retrieved {total_results} eBay items for '{query}'")
+
+                # Store results in MongoDB (cache)
+                cache_collection.update_one(
+                    {"query": query},
+                    {"$set": {"results": results, "last_updated": datetime.datetime.utcnow()}},
+                    upsert=True
+                )
+
+                # Store user searches for trending tracking
+                store_user_search(query, results[:6])
+
+                return results
+
+            elif response.status_code == 429:
+                logging.warning("⚠️ Rate limit exceeded. Retrying after 10 seconds...")
+                time.sleep(10)  # Wait before retrying
+
+            else:
+                logging.error(f"❌ eBay API Error {response.status_code}: {response.text}")
+                break  # Stop retries if other errors occur
+
+        except requests.exceptions.Timeout:
+            logging.warning(f"⚠️ Timeout occurred for query: {query}. Retrying...")
+        except requests.exceptions.RequestException as e:
+            logging.error(f"❌ Request failed: {str(e)}")
+            break
+
+        attempt += 1
+
+    logging.error(f"❌ Failed to fetch data for query: {query} after {MAX_RETRIES} attempts.")
+    return []
+
+
+
+
